@@ -272,13 +272,20 @@
     </div>
 
     <button class="btn-start" id="btn-start" disabled>Rijden maar →</button>
+
+    <div class="divider"></div>
+    <div class="field-group">
+      <div class="field-label">Kennismaking & Profiel</div>
+      <button class="btn btn-ghost" id="btn-kennismaking" style="width:100%; margin-bottom:8px;">🤝 Start kennismakingsgesprek</button>
+      <div id="profiel-preview" style="font-family:'DM Mono',monospace; font-size:12px; color:var(--text2); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px 12px; line-height:1.8; display:none;"></div>
+    </div>
   </div>
 
   <!-- CHAT SCREEN -->
   <div class="screen" id="chat">
     <div class="chat-messages" id="messages"></div>
     <div class="mic-panel">
-      <div class="wake-label">Activeringswoord: "Hallo Claude Car"</div>
+      <div class="wake-label" id="wake-label">Activeringswoord: "Hallo Auto Assistent"</div>
       <div class="mic-outer mic-state-idle" id="mic-outer">
         <div class="mic-ring"></div>
         <div class="mic-btn-inner" id="mic-btn">🎙️</div>
@@ -293,16 +300,24 @@
 </div>
 
 <script>
-const WAKE = 'hallo claude car';
+const WAKE = 'hallo auto assistent';
+const WAKE_ALTS = ['hallo auto', 'auto assistent', 'hallo assistent'];
 const MODEL = 'claude-haiku-4-5-20251001';
 const STORE = 'claudecar_v2';
 
-let state = JSON.parse(localStorage.getItem(STORE) || '{"sessions":[],"apiKey":""}');
+let state = JSON.parse(localStorage.getItem(STORE) || '{"sessions":[],"apiKey":"","profiel":{}}');
 let currentSess = null;
 let recognition = null;
 let isAwake = false;
 let isProcessing = false;
 let isListening = false;
+let inConversation = false;
+let inputBuffer = [];      // verzamelt spraakfragmenten tot stopwoord
+let waitTimer = null;      // 5-seconden wachttimer
+
+const STOPWOORD = 'verwerk deze input';
+const STOPWOORD_ALTS = ['verwerk input', 'verwerk dit', 'roger', 'roger dat', 'verwerk'];
+const SLUITWOORDEN = ['dank je', 'doei', 'tot ziens', 'afsluiten', 'einde sessie', 'gesprek beëindigen'];
 
 function save() { localStorage.setItem(STORE, JSON.stringify(state)); }
 
@@ -366,6 +381,28 @@ btnAdd.addEventListener('click', () => {
 
 newSessInput.addEventListener('keydown', e => { if (e.key === 'Enter') btnAdd.click(); });
 
+const btnKennismaking = document.getElementById('btn-kennismaking');
+const profielPreview = document.getElementById('profiel-preview');
+
+function renderProfiel() {
+  if (Object.keys(state.profiel).length === 0) { profielPreview.style.display = 'none'; return; }
+  profielPreview.style.display = 'block';
+  profielPreview.innerHTML = Object.entries(state.profiel).map(([k,v]) => `<b>${k}:</b> ${esc(v)}`).join('<br>');
+}
+
+btnKennismaking.addEventListener('click', () => {
+  if (!state.apiKey) { alert('Voer eerst je API-sleutel in.'); return; }
+  const s = { id: Date.now(), name: '🤝 Kennismaking', messages: [], isKennismaking: true };
+  state.sessions.push(s);
+  currentSess = s;
+  save();
+  showChat();
+  setTimeout(() => {
+    isAwake = true; inConversation = true;
+    handleUserInput('Start de kennismaking. Stel je eerste vraag.');
+  }, 800);
+});
+
 btnStart.addEventListener('click', () => {
   state.apiKey = apiInput.value.trim();
   save();
@@ -407,7 +444,7 @@ function showChat() {
 function renderMessages() {
   messagesEl.innerHTML = '';
   if (!currentSess || currentSess.messages.length === 0) {
-    messagesEl.innerHTML = '<div class="empty-state"><div class="empty-icon">🎙️</div><div class="empty-text">Zeg "Hallo Claude Car" om te beginnen,<br>of tik op de microfoon.</div></div>';
+    messagesEl.innerHTML = '<div class="empty-state"><div class="empty-icon">🎙️</div><div class="empty-text">Zeg "Hallo Auto Assistent" om te beginnen,<br>of tik op de microfoon.</div></div>';
     return;
   }
   currentSess.messages.forEach(m => addBubble(m.role, m.content, false));
@@ -444,27 +481,73 @@ function startRecognition() {
   isListening = true;
 
   recognition.onstart = () => {
-    setMicState(isAwake ? 'awake' : 'listening');
-    micStatus.textContent = isAwake ? 'Luisteren... spreek je bericht' : 'Luisteren naar "Hallo Claude Car"...';
-    micStatus.className = 'mic-status active';
+    if (!isProcessing) {
+      setMicState(isAwake || inConversation ? 'awake' : 'listening');
+      if (inConversation) {
+        micStatus.textContent = inputBuffer.length > 0
+          ? '🎙️ Buffering... zeg "Verwerk deze input" als je klaar bent'
+          : 'Luisteren... spreek en zeg "Verwerk deze input" als je klaar bent';
+      } else {
+        micStatus.textContent = 'Zeg "Hallo Auto Assistent"...';
+      }
+      micStatus.className = 'mic-status active';
+    }
   };
 
   recognition.onresult = (e) => {
     const t = e.results[0][0].transcript.toLowerCase().trim();
+    const raw = e.results[0][0].transcript.trim();
     isListening = false;
-    if (!isAwake) {
-      if (t.includes('hallo claude') || t.includes('claude car') || t.includes(WAKE)) {
+    clearWaitTimer();
+
+    if (!isAwake && !inConversation) {
+      // Wacht op activeringswoord
+      if (t.includes(WAKE) || WAKE_ALTS.some(a => t.includes(a))) {
         isAwake = true;
+        inConversation = true;
+        inputBuffer = [];
         setMicState('awake');
-        speak('Ja, ik luister. Wat wil je bespreken?', () => startRecognition());
+        speak('Ja, ik luister. Spreek je bericht en zeg "Verwerk deze input" als je klaar bent.', () => startRecognition());
       } else {
-        setMicState('idle');
-        micStatus.textContent = 'Zeg "Hallo Claude Car" of tik opnieuw';
-        micStatus.className = 'mic-status';
         setTimeout(() => startRecognition(), 400);
       }
+      return;
+    }
+
+    // In gespreksmodus: check sluitwoorden
+    if (SLUITWOORDEN.some(w => t.includes(w)) && !t.includes('verwerk')) {
+      inputBuffer = [];
+      inConversation = false; isAwake = false;
+      speak('Oké, tot de volgende keer! Rij veilig.', () => {
+        setMicState('listening');
+        micStatus.textContent = 'Zeg "Hallo Auto Assistent" om te beginnen';
+        startRecognition();
+      });
+      return;
+    }
+
+    // Check stopwoord
+    const heeftStopwoord = t.includes(STOPWOORD) || STOPWOORD_ALTS.some(s => t.endsWith(s) || t.includes(s + ' '));
+    if (heeftStopwoord) {
+      // Verwijder stopwoord uit tekst en voeg toe aan buffer
+      let schoon = raw;
+      [STOPWOORD, ...STOPWOORD_ALTS].forEach(s => {
+        schoon = schoon.replace(new RegExp(s, 'gi'), '').trim();
+      });
+      if (schoon) inputBuffer.push(schoon);
+      const volledigeInput = inputBuffer.join(' ').trim();
+      inputBuffer = [];
+      if (volledigeInput) {
+        handleUserInput(volledigeInput);
+      } else {
+        speak('Je bericht was leeg. Wat wil je zeggen?', () => startRecognition());
+      }
     } else {
-      handleUserInput(e.results[0][0].transcript.trim());
+      // Voeg toe aan buffer, start 5-sec timer
+      if (raw) inputBuffer.push(raw);
+      micStatus.textContent = `🎙️ Buffer: "${inputBuffer.join(' ').slice(0,40)}..." — zeg "Verwerk deze input"`;
+      startWaitTimer();
+      startRecognition();
     }
   };
 
@@ -488,8 +571,78 @@ function startRecognition() {
 function stopAll() {
   if (recognition) { try { recognition.abort(); } catch(e){} recognition = null; }
   window.speechSynthesis.cancel();
-  isAwake = false; isProcessing = false; isListening = false;
+  isAwake = false; isProcessing = false; isListening = false; inConversation = false;
+  inputBuffer = [];
+  clearWaitTimer();
   setMicState('idle');
+}
+
+function startWaitTimer() {
+  clearWaitTimer();
+  waitTimer = setTimeout(() => {
+    if (inConversation && !isProcessing && inputBuffer.length > 0) {
+      // Pauzeer luisteren en vraag bevestiging
+      if (recognition) { try { recognition.abort(); } catch(e){} recognition = null; }
+      speak('Moet ik je input verwerken, of wil je nog iets toevoegen?', () => {
+        // Luister naar antwoord
+        startBevestigingLuisteren();
+      });
+    }
+  }, 5000);
+}
+
+function clearWaitTimer() {
+  if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+}
+
+function startBevestigingLuisteren() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  const r = new SR();
+  r.lang = 'nl-NL'; r.continuous = false; r.interimResults = false;
+  r.onresult = (e) => {
+    const t = e.results[0][0].transcript.toLowerCase().trim();
+    if (t.includes('verwerk') || t.includes('ja') || t.includes('klopt') || t.includes('correct') || t.includes('roger')) {
+      const volledigeInput = inputBuffer.join(' ').trim();
+      inputBuffer = [];
+      if (volledigeInput) handleUserInput(volledigeInput);
+      else { speak('Geen input gevonden. Wat wil je zeggen?', () => startRecognition()); }
+    } else {
+      speak('Oké, ga verder. Zeg "Verwerk deze input" als je klaar bent.', () => startRecognition());
+    }
+  };
+  r.onerror = () => startRecognition();
+  r.onend = () => {};
+  setMicState('awake');
+  micStatus.textContent = 'Verwerken of doorgaan?';
+  try { r.start(); } catch(e) {}
+}
+
+async function updateProfiel(messages) {
+  // Stuur gesprek naar Claude om profiel te extraheren
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': state.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 500,
+        system: 'Analyseer dit gesprek en extraheer feitelijke persoonlijke informatie over de gebruiker. Geef een JSON object terug met korte sleutel-waarde paren, zoals: {"naam":"...","werk":"...","hobby":"...","woonplaats":"...","gezin":"...","communicatiestijl":"..."}. Alleen wat daadwerkelijk genoemd is. Geen aannames. Alleen JSON, geen andere tekst.',
+        messages: messages.slice(-20)
+      })
+    });
+    const data = await res.json();
+    const text = data.content?.[0]?.text || '{}';
+    const clean = text.replace(/```json|```/g, '').trim();
+    const extracted = JSON.parse(clean);
+    state.profiel = { ...state.profiel, ...extracted };
+    save();
+  } catch(e) { console.log('Profiel update mislukt', e); }
 }
 
 function speak(text, cb) {
@@ -514,7 +667,15 @@ async function handleUserInput(text) {
   addBubble('user', text);
   save();
 
-  const sysPrompt = `Je bent Claude Car, een vriendelijke en slimme spraakassistent voor in de auto. Je spreekt altijd Nederlands. Houd antwoorden kort en geschikt voor gesproken taal — maximaal 3 zinnen, tenzij de gebruiker meer detail vraagt. Geen opsommingstekens of opmaak. Wees direct en bondig. Huidige sessie: "${currentSess.name}".`;
+  const profielTekst = Object.keys(state.profiel).length > 0
+    ? '\n\nWat je al weet over de gebruiker:\n' + Object.entries(state.profiel).map(([k,v]) => `- ${k}: ${v}`).join('\n')
+    : '';
+
+  const isKennismaking = currentSess.isKennismaking;
+
+  const sysPrompt = isKennismaking
+    ? `Je bent een vriendelijke persoonlijke assistent in de auto. Je taak in deze sessie is de gebruiker goed leren kennen door een natuurlijk gesprek te voeren. Stel één persoonlijke vraag tegelijk — over werk, hobby's, gezin, ambities, werkwijze, voorkeuren, gewoontes. Luister aandachtig naar de antwoorden en stel doorvragende vervolgvragen. Spreek altijd Nederlands. Antwoorden zijn kort en gesproken — geen opsommingstekens. Na elk antwoord van de gebruiker stel je één nieuwe vraag.${profielTekst}`
+    : `Je bent een slimme persoonlijke assistent voor in de auto. Je spreekt altijd Nederlands. Je voert een vloeiend, natuurlijk gesprek. Antwoorden zijn kort en geschikt voor gesproken taal — maximaal 3 zinnen tenzij meer gevraagd wordt. Geen opsommingstekens of opmaak. Je kunt taken bespreken, ideeën uitwerken, vragen beantwoorden en plannen maken. Huidige sessie: "${currentSess.name}".${profielTekst}`;`;
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -542,12 +703,17 @@ async function handleUserInput(text) {
     save();
 
     isProcessing = false;
+    inputBuffer = [];
     speak(reply, () => {
-      isAwake = false;
-      setMicState('listening');
-      micStatus.textContent = 'Luisteren naar "Hallo Claude Car"...';
+      setMicState('awake');
+      micStatus.textContent = 'Spreek en zeg "Verwerk deze input" als je klaar bent';
       startRecognition();
     });
+
+    // Profiel bijwerken na kennismaking-sessie
+    if (currentSess.isKennismaking) {
+      updateProfiel(currentSess.messages);
+    }
 
   } catch (err) {
     const msg = 'Fout: ' + (err.message || 'Controleer je API-sleutel en verbinding.');
@@ -565,6 +731,7 @@ function esc(s) {
 
 // Init
 renderSessions();
+renderProfiel();
 checkReady();
 
 // Preload voices
