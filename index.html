@@ -103,6 +103,11 @@
   .empty-text{font-size:13px;color:var(--text3);text-align:center;line-height:1.7;}
   ::-webkit-scrollbar{width:3px;}
   ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+
+  .tap-btn{width:100%;padding:18px;font-size:17px;font-weight:800;border-radius:var(--radius);border:none;cursor:pointer;font-family:'Syne',sans-serif;background:linear-gradient(135deg,var(--green),#2bc87e);color:#0a0a0f;transition:transform 0.1s,opacity 0.15s;display:none;max-width:320px;}
+  .tap-btn.visible{display:block;}
+  .tap-btn:active{transform:scale(0.97);}
+  .tap-btn.recording{background:linear-gradient(135deg,var(--amber),#e8931a);}
 </style>
 </head>
 <body>
@@ -150,14 +155,14 @@
     <div class="chat-messages" id="messages"></div>
     <div class="mic-panel">
       <div class="badge-row">
-        <div class="badge">Wake: "Hallo Auto Assistent"</div>
-        <div class="badge green">Stop: "Verwerk deze input"</div>
+        <div class="badge green" id="stop-badge" style="display:none">Stop: "Verwerk deze input"</div>
       </div>
       <div class="mic-outer s-idle" id="mic-outer">
         <div class="mic-ring"></div>
         <div class="mic-inner" id="mic-btn">🎙️</div>
       </div>
       <div class="mic-status" id="mic-status">Tik op de microfoon om te starten</div>
+      <button class="tap-btn" id="tap-btn">🎙️ Tik om te antwoorden</button>
       <div class="bottom-row">
         <button class="btn btn-ghost" id="btn-back">← Terug</button>
         <button class="btn btn-ghost" id="btn-clear">Wis chat</button>
@@ -241,7 +246,7 @@ btnKenn.addEventListener('click',()=>{
 });
 btnBack.addEventListener('click',()=>{stopAll();showScreen('setup');renderSessions();renderProfiel();});
 btnClear.addEventListener('click',()=>{if(sess){sess.messages=[];save();renderMessages();}});
-micBtnEl.addEventListener('click',()=>{if(!isListen&&!isProc)startRec();});
+micBtnEl.addEventListener('click',()=>{if(!isListen&&!isProc){intentionalStop=false;startRec();}});
 
 function showScreen(id){
   document.getElementById('setup').classList.toggle('active',id==='setup');
@@ -249,7 +254,9 @@ function showScreen(id){
 }
 function startChat(){
   hdrSess.textContent=sess.name;showScreen('chat');renderMessages();
-  setMic('idle');micStat.textContent='Tik op de microfoon om te starten';
+  setMic('listening');micStat.textContent='Zeg "Hallo Auto Assistent"...';
+  intentionalStop=false;
+  startRec();
 }
 function renderMessages(){
   messagesEl.innerHTML='';
@@ -268,73 +275,135 @@ function setMic(s){
   micBtnEl.textContent=icons[s]||'🎙️';
 }
 
-// ── SPRAAKHERKENNING ──
+// ── CONTINUE SPRAAKHERKENNING ──
+// Microfoon blijft altijd aan — geen herstart nodig, veilig tijdens rijden
+
 function startRec(){
-  if(isProc)return;
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SR){micStat.textContent='Gebruik Chrome voor spraakherkenning.';return;}
-  rec=new SR();rec.lang='nl-NL';rec.continuous=false;rec.interimResults=false;isListen=true;
+  if(rec){try{rec.abort();}catch(e){}}
+
+  rec=new SR();
+  rec.lang='nl-NL';
+  rec.continuous=true;      // Blijft luisteren zonder onderbreking
+  rec.interimResults=false; // Alleen definitieve resultaten
+  isListen=true;
 
   rec.onstart=()=>{
     isListen=true;
-    if(inConv&&buf.length>0){setMic('buffering');micStat.textContent='📝 Buffer actief — zeg "Verwerk deze input" als je klaar bent';}
-    else if(inConv){setMic('awake');micStat.textContent='Luisteren... zeg "Verwerk deze input" als je klaar bent';}
-    else{setMic('listening');micStat.textContent='Zeg "Hallo Auto Assistent"...';}
+    updateStatus();
     micStat.className='mic-status on';
   };
 
   rec.onresult=e=>{
-    const raw=e.results[0][0].transcript.trim();
+    // Bij continuous:true komen resultaten per index binnen
+    const idx=e.results.length-1;
+    if(!e.results[idx].isFinal)return; // Alleen definitieve resultaten
+    const raw=e.results[idx][0].transcript.trim();
     const t=raw.toLowerCase();
-    isListen=false;clearWT();
+    if(!raw)return;
+    clearWT();
+
+    // Bevestiging na 5-sec timer vraag
+    if(waitingForConfirm){
+      waitingForConfirm=false;
+      const ja=['ja','verwerk','klopt','correct','doe maar','graag','yes'].some(w=>t.includes(w));
+      if(ja){const v=buf.join(' ').trim();buf=[];if(v)processInput(v);}
+      else{micStat.textContent='Oké, ga verder. Zeg "Verwerk deze input" als je klaar bent.';setMic('awake');}
+      return;
+    }
+
+    // Negeer spraak terwijl assistent praat of denkt
+    if(isProc)return;
 
     // Wake word
     if(!isAwake&&!inConv){
       if(t.includes(WAKE)||WAKE_ALTS.some(w=>t.includes(w))){
-        isAwake=true;inConv=true;buf=[];setMic('awake');
-        speak('Ja, ik luister. Spreek je bericht en zeg "Verwerk deze input" als je klaar bent.',()=>startRec());
-      }else{setTimeout(()=>startRec(),400);}
+        isAwake=true;inConv=true;buf=[];
+        setMic('awake');
+        micStat.textContent='Ik luister — zeg "Verwerk deze input" als je klaar bent';
+        window.speechSynthesis.cancel();
+        const utt=new SpeechSynthesisUtterance('Ja, ik luister.');
+        utt.lang='nl-NL';
+        const v=window.speechSynthesis.getVoices().find(v=>v.lang.startsWith('nl'));if(v)utt.voice=v;
+        window.speechSynthesis.speak(utt);
+      }
       return;
     }
 
     // Sluitwoord
     if(SLUITWOORDEN.some(w=>t.includes(w))){
       buf=[];inConv=false;isAwake=false;
-      speak('Oké, tot de volgende keer! Rij veilig.',()=>{setMic('listening');micStat.textContent='Zeg "Hallo Auto Assistent" om opnieuw te starten';startRec();});
+      setMic('listening');
+      micStat.textContent='Zeg "Hallo Auto Assistent" om opnieuw te starten';
+      const utt=new SpeechSynthesisUtterance('Oké, tot de volgende keer! Rij veilig.');
+      utt.lang='nl-NL';
+      const v=window.speechSynthesis.getVoices().find(v=>v.lang.startsWith('nl'));if(v)utt.voice=v;
+      window.speechSynthesis.speak(utt);
       return;
     }
 
-    // Stopwoord
+    // Stopwoord → verwerk buffer
     const heeftStop=t.includes(STOPWOORD)||STOP_ALTS.some(w=>t.includes(w));
     if(heeftStop){
       let schoon=raw;
       [STOPWOORD,...STOP_ALTS].forEach(w=>{schoon=schoon.replace(new RegExp(w,'gi'),'').trim();});
       if(schoon)buf.push(schoon);
       const vol=buf.join(' ').trim();buf=[];
-      if(vol){processInput(vol);}else{speak('Je bericht was leeg. Wat wil je zeggen?',()=>startRec());}
+      if(vol){processInput(vol);}
+      else{
+        const utt=new SpeechSynthesisUtterance('Je bericht was leeg. Wat wil je zeggen?');
+        utt.lang='nl-NL';window.speechSynthesis.speak(utt);
+      }
       return;
     }
 
     // Normaal fragment → buffer
-    if(raw)buf.push(raw);
+    buf.push(raw);
     const prev=buf.join(' ');
     micStat.textContent='📝 "'+(prev.length>50?prev.slice(0,50)+'...':prev)+'" — zeg "Verwerk deze input"';
-    startWT();startRec();
+    setMic('buffering');
+    startWT();
   };
 
   rec.onerror=e=>{
-    isListen=false;
-    if(e.error==='not-allowed'){micStat.textContent='Geef microfoon-toegang in Chrome-instellingen';setMic('idle');return;}
-    if(!isProc)setTimeout(()=>startRec(),600);
+    if(e.error==='not-allowed'){
+      micStat.textContent='Geef microfoon-toegang in Chrome-instellingen';
+      setMic('idle');isListen=false;return;
+    }
+    // Bij andere fouten: herstart na korte pauze
+    if(e.error!=='aborted'){
+      isListen=false;
+      setTimeout(()=>{if(!isProc)startRec();},1000);
+    }
   };
-  rec.onend=()=>{isListen=false;if(!isProc)setTimeout(()=>startRec(),300);};
-  try{rec.start();}catch(e){}
+
+  rec.onend=()=>{
+    isListen=false;
+    // Herstart automatisch tenzij we bewust gestopt zijn
+    if(!intentionalStop){
+      setTimeout(()=>{if(!isProc)startRec();},500);
+    }
+  };
+
+  try{rec.start();}catch(e){setTimeout(()=>startRec(),500);}
 }
 
+let intentionalStop=false;
+
 function stopAll(){
+  intentionalStop=true;
   if(rec){try{rec.abort();}catch(e){}rec=null;}
   window.speechSynthesis.cancel();
   isAwake=false;isProc=false;isListen=false;inConv=false;buf=[];clearWT();setMic('idle');
+  setTimeout(()=>{intentionalStop=false;},200);
+}
+
+function updateStatus(){
+  if(isProc){setMic('thinking');}
+  else if(inConv&&buf.length>0){setMic('buffering');micStat.textContent='📝 Buffer actief — zeg "Verwerk deze input"';}
+  else if(inConv){setMic('awake');micStat.textContent='Luisteren... zeg "Verwerk deze input" als je klaar bent';}
+  else{setMic('listening');micStat.textContent='Zeg "Hallo Auto Assistent"...';}
 }
 
 // ── 5-SEC TIMER ──
@@ -342,26 +411,21 @@ function startWT(){
   clearWT();
   waitTmr=setTimeout(()=>{
     if(!inConv||isProc||!buf.length)return;
-    if(rec){try{rec.abort();}catch(e){}rec=null;}isListen=false;
-    speak('Moet ik je input nu verwerken, of wil je nog iets toevoegen?',()=>luisterBevestiging());
+    const utt=new SpeechSynthesisUtterance('Moet ik je input nu verwerken, of wil je nog iets toevoegen?');
+    utt.lang='nl-NL';
+    const v=window.speechSynthesis.getVoices().find(v=>v.lang.startsWith('nl'));if(v)utt.voice=v;
+    // Na vraag luistert de continue rec al — antwoord komt via onresult
+    utt.onend=()=>{
+      setMic('awake');micStat.textContent='Verwerken (ja) of doorgaan (nee)?';
+      // Zet tijdelijk een vlag zodat het volgende onresult als bevestiging wordt behandeld
+      waitingForConfirm=true;
+    };
+    window.speechSynthesis.speak(utt);
   },5000);
 }
 function clearWT(){if(waitTmr){clearTimeout(waitTmr);waitTmr=null;}}
 
-function luisterBevestiging(){
-  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(!SR)return;
-  const r=new SR();r.lang='nl-NL';r.continuous=false;r.interimResults=false;
-  setMic('awake');micStat.textContent='Verwerken of doorgaan?';
-  r.onresult=e=>{
-    const t=e.results[0][0].transcript.toLowerCase().trim();
-    const ja=['ja','verwerk','klopt','correct','doe maar','graag','yes'].some(w=>t.includes(w));
-    if(ja){const v=buf.join(' ').trim();buf=[];if(v)processInput(v);else speak('Geen input. Ga verder.',()=>startRec());}
-    else{speak('Oké, ga verder. Zeg "Verwerk deze input" als je klaar bent.',()=>startRec());}
-  };
-  r.onerror=()=>startRec();r.onend=()=>{};
-  try{r.start();}catch(e){}
-}
+let waitingForConfirm=false;
 
 // ── TEKST-NAAR-SPRAAK ──
 function speak(text,cb){
@@ -398,7 +462,12 @@ async function processInput(rawText){
     sess.messages.push({role:'assistant',content:reply});addMsg('assistant',reply);save();
     if(sess.isKennismaking)updateProfiel(sess.messages);
     isProc=false;buf=[];
-    speak(reply,()=>{setMic('awake');micStat.textContent='Luisteren... zeg "Verwerk deze input" als je klaar bent';startRec();});
+    speak(reply,()=>{
+      // Continue modus: microfoon luistert al — gewoon status updaten
+      isAwake=true;inConv=true;
+      setMic('awake');
+      micStat.textContent='Luisteren... zeg "Verwerk deze input" als je klaar bent';
+    });
   }catch(err){
     addMsg('system','Fout: '+(err.message||'Controleer je API-sleutel.'));
     isProc=false;isAwake=false;inConv=false;setMic('idle');micStat.textContent='Er ging iets mis. Tik om opnieuw te proberen.';
