@@ -195,6 +195,7 @@ input::placeholder{color:var(--text3);}
     </div>
 
     <button class="btn-start" id="btn-start" disabled>Starten →</button>
+    <div id="ready-hint" style="font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;text-align:center;min-height:16px;"></div>
 
     <div class="divider"></div>
     <div class="field-group">
@@ -319,6 +320,9 @@ if(state.claudeKey) claudeKeyEl.value = state.claudeKey;
 if(state.openaiKey) openaiKeyEl.value = state.openaiKey;
 claudeKeyEl.addEventListener('input', () => { state.claudeKey = claudeKeyEl.value.trim(); save(); checkReady(); });
 openaiKeyEl.addEventListener('input', () => { state.openaiKey = openaiKeyEl.value.trim(); save(); checkReady(); });
+// Ook bij blur opslaan (bijv. als autofill de waarde zet)
+claudeKeyEl.addEventListener('blur', () => { state.claudeKey = claudeKeyEl.value.trim(); save(); checkReady(); });
+openaiKeyEl.addEventListener('blur', () => { state.openaiKey = openaiKeyEl.value.trim(); save(); checkReady(); });
 
 // ════════════════════════════════════════
 // MODUS KEUZE
@@ -373,6 +377,15 @@ function createSession(name, isKenn = false) {
   return s;
 }
 
+// Auto-select last used session on load
+function autoSelectLastSession() {
+  if (!sess && state.sessions.length > 0) {
+    sess = state.sessions[state.sessions.length - 1];
+    renderSessions();
+    checkReady();
+  }
+}
+
 function renderProfiel() {
   const entries = Object.entries(state.profiel);
   if (!entries.length) { profielGrp.style.display = 'none'; return; }
@@ -382,13 +395,31 @@ function renderProfiel() {
 }
 
 const checkReady = () => {
-  btnStart.disabled = !(state.claudeKey && state.openaiKey && sess);
+  // Lees direct uit velden zodat het werkt ook als state nog niet bijgewerkt is
+  const hasClaudeKey = (claudeKeyEl.value.trim() || state.claudeKey);
+  const hasOpenaiKey = (openaiKeyEl.value.trim() || state.openaiKey);
+  const ready = !!(hasClaudeKey && hasOpenaiKey && sess);
+  btnStart.disabled = !ready;
+  updateReadyHint();
 };
+
+function updateReadyHint() {
+  const hint = document.getElementById('ready-hint');
+  if (!hint) return;
+  const hasClaudeKey = (claudeKeyEl.value.trim() || state.claudeKey);
+  const hasOpenaiKey = (openaiKeyEl.value.trim() || state.openaiKey);
+  if (!hasClaudeKey) { hint.textContent = '⚠️ Voer je Anthropic (Claude) API-sleutel in'; hint.style.color='var(--amber)'; return; }
+  if (!hasOpenaiKey) { hint.textContent = '⚠️ Voer je OpenAI (Whisper) API-sleutel in'; hint.style.color='var(--amber)'; return; }
+  if (!sess) { hint.textContent = '⚠️ Typ een naam en druk op + om een sessie aan te maken'; hint.style.color='var(--amber)'; return; }
+  hint.textContent = '✅ Klaar om te starten!';
+  hint.style.color = 'var(--green)';
+}
 
 btnAdd.addEventListener('click', () => {
   const name = newSessEl.value.trim() || 'Idee ' + (state.sessions.length + 1);
   createSession(name);
   newSessEl.value = '';
+  updateReadyHint();
 });
 newSessEl.addEventListener('keydown', e => { if (e.key === 'Enter') btnAdd.click(); });
 
@@ -396,6 +427,10 @@ btnStart.addEventListener('click', () => {
   state.claudeKey = claudeKeyEl.value.trim();
   state.openaiKey = openaiKeyEl.value.trim();
   save();
+  if (!state.claudeKey || !state.openaiKey || !sess) {
+    checkReady();
+    return;
+  }
   startChat();
 });
 
@@ -1053,7 +1088,11 @@ function stopAll() {
 // INIT
 // ════════════════════════════════════════
 renderSessions();
+autoSelectLastSession();
 renderProfiel();
+// Zorg dat sleutels uit velden worden gelezen bij init
+state.claudeKey = claudeKeyEl.value.trim() || state.claudeKey;
+state.openaiKey = openaiKeyEl.value.trim() || state.openaiKey;
 checkReady();
 window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
 window.speechSynthesis.getVoices();
